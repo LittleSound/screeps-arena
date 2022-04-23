@@ -115,7 +115,7 @@ export function loop(): void {
 
 /** 编队 */
 function formation() {
-  const rangeds = [...rangedCreeps]
+  let rangeds = [...rangedCreeps]
   const heals = [...healCreeps]
 
   heals.forEach(creep => {
@@ -126,12 +126,17 @@ function formation() {
     creep.target = undefined
 
     // 补货
-    if (!(rangeds.length > 0) && (rangedCreeps.length > 0)) {
-      rangeds.push(...rangedCreeps)
+    if (rangeds.length === 0) {
+      if (rangedCreeps.length > 0) {
+        rangeds = [...rangedCreeps]
+      }
+      else if (attackCreeps.length > 0) {
+        rangeds = [...rangedCreeps]
+      }
     }
-    else if (attackCreeps.length > 0) {
-      rangeds.push(...attackCreeps)
-    }
+
+    // 剩余需要治疗的单位按照已有奶妈数量生序排列
+    rangeds.sort((a, b) => (a.myHealers?.length || 0) - (b.myHealers?.length || 0))
 
     let ranged = rangeds.shift()
     if (!ranged) return console.log(`❌ Heal: ${creep.id} 组队匹配失败`)
@@ -177,7 +182,7 @@ function rangedAttacker(creep: Creep) {
   /** 攻击范围 */
   const attackRange = 10
   /** 队伍范围 */
-  const lagRange = 3
+  const lagRange = 2
   /** 逃离范围 */
   const fleeRange = 3
 
@@ -196,8 +201,8 @@ function rangedAttacker(creep: Creep) {
   } // 血量恢复到 90% 时退出濒死状态
   else if (creep.hits > creep.hitsMax * 0.7) {
     creep.state = CreepState.Default
-  } // 如果有敌人接近我方旗帜，则进入回防模式
-  if (myFlag && assaultEnemys.length > 0 && getTicks() < 1500) {
+  } // 开局时先防守，并且如果有敌人接近我方旗帜，则进入回防模式
+  if ((getTicks() < 500 && enemyCreeps.length > 4) || (myFlag && assaultEnemys.length > 0 && getTicks() < 1500)) {
     creep.state = CreepState.Defense
   }
 
@@ -214,11 +219,14 @@ function rangedAttacker(creep: Creep) {
     if (leftBehinds?.length && ((creep.myHealers?.length || 0) - leftBehinds.length) < 2) {
       creep.moveTo(leftBehinds[0])
     }
+    else if (getRange(enemyFlag, creep) < 4 && enemyFlag.findInRange(enemyCreeps, 1)) {
+      // 原地输出
+    }
     // 如果距离敌方旗子十步以内，优先向旗子移动
     else if (getRange(enemyFlag, creep) < 10) {
       creep.moveTo(enemyFlag)
     } // 如果附近有敌人，向附近敌人中血量最低的敌人移动
-    else if (targets.length) {
+    else if (targets.length && getTicks() < 1900) {
       creep.moveTo(targets[0])
     } // 默认向敌方旗子移动
     else {
@@ -238,7 +246,7 @@ function rangedAttacker(creep: Creep) {
   }
 
   const enemiesInRange = enemyCreeps.filter(i => getRange(i, creep) < fleeRange)
-  if (assaultEnemys[0] && getRange(assaultEnemys[0], myFlag) < 5) {
+  if (creep.state === CreepState.Defense && assaultEnemys.length > 0 && getRange(assaultEnemys[0], myFlag) < 5) {
     creep.moveTo(assaultEnemys[0])
   }
   else {
@@ -268,7 +276,7 @@ function rangedAttacker(creep: Creep) {
 
 /** 奶妈程序 */
 function healer(creep: Creep) {
-  const fleeRange = 5
+  const fleeRange = 4
 
   if (!creep.target) {
     console.log(`❌ heal:${creep.id} 没有治疗目标`)
@@ -282,17 +290,16 @@ function healer(creep: Creep) {
     : creep.target.myHealers
       ?.filter(i => i.hits < i.hitsMax && getRange(i, creep) < 4)
       .sort((a, b) => a.hits - b.hits)[0]
-      || creep.target
+    || creep.target
 
   creep.moveTo(creep.target)
-  creep.rangedHeal(healTarget)
+  if (healTarget && creep.getRangeTo(healTarget) < 2) {
+    creep.heal(healTarget)
+  } else {
+    creep.rangedHeal(healTarget)
+  }
 
-
-
-  // // 如果距离敌方旗子十步以内，优先向旗子移动
-  // if (getRange(enemyFlag, creep) < 4) {
-  //   creep.moveTo(enemyFlag)
-  // }
+  if (creep.target && creep.getRangeTo(creep.target) > 3) return
 
   const enemiesInRange = enemyCreeps.filter(i => getRange(i, creep) < fleeRange)
   if (enemiesInRange.length > 0) {
@@ -301,11 +308,11 @@ function healer(creep: Creep) {
 }
 
 function towerProd(tower: StructureTower) {
-  const target = tower.findClosestByRange(enemyCreeps)
+  const target = tower.findInRange(enemyCreeps, 50)
   const healTarget = myCreeps.filter(i => getRange(i, tower) < 51 && i.hits < i.hitsMax).sort((a, b) => a.hits - b.hits)
 
-  if (target) {
-    tower.attack(target)
+  if (target.length > 0) {
+    tower.attack(target[0])
   }
   else if (healTarget.length) {
     tower.heal(healTarget[0])
