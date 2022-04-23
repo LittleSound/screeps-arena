@@ -30,14 +30,24 @@
 // This stuff is arena-specific
 import { ATTACK, HEAL, RANGED_ATTACK } from "game/constants";
 import { BodyPart, Flag } from "arena";
-import { Creep, GameObject } from "game/prototypes";
+import { Creep, GameObject, StructureTower } from "game/prototypes";
 import { getDirection, getObjectsByPrototype, getRange, getTicks } from "game/utils";
 import { searchPath } from "game/path-finder";
 import { Visual } from "game/visual";
 
+enum CreepState {
+  Default,
+  Dying,
+  Defense,
+}
+
 declare module "game/prototypes" {
   interface Creep {
-    initialPos: RoomPosition;
+    initialPos: RoomPosition
+    target?: Creep
+    myHealers?: Creep[]
+    historyHits?: number
+    state?: CreepState
   }
 }
 
@@ -47,42 +57,96 @@ declare module "game/prototypes" {
 // We can define global objects that will be valid for the entire match.
 // The game guarantees there will be no global reset during the match.
 // Note that you cannot assign any game objects here, since they are populated on the first tick, not when the script is initialized.
-let myCreeps: Creep[];
-let enemyCreeps: Creep[];
-let enemyFlag: Flag | undefined;
+let myCreeps: Creep[]
+let myFlag: Flag | undefined
+let myTowers: StructureTower[]
+
+let enemyCreeps: Creep[]
+let enemyFlag: Flag
+
+let healCreeps: Creep[] = []
+let attackCreeps: Creep[] = []
+let rangedCreeps: Creep[] = []
 
 // This is the only exported function from the main module. It is called every tick.
 export function loop(): void {
-  // We assign global variables here. They will be accessible throughout the tick, and even on the following ticks too.
-  // getObjectsByPrototype function is the alternative to Room.find from Screeps World.
-  // There is no Game.creeps or Game.structures, you can manage game objects in your own way.
-  myCreeps = getObjectsByPrototype(Creep).filter(i => i.my);
-  enemyCreeps = getObjectsByPrototype(Creep).filter(i => !i.my);
-  enemyFlag = getObjectsByPrototype(Flag).find(i => !i.my);
+  attackCreeps = []
+  rangedCreeps = []
+  healCreeps = []
 
-  // Notice how getTime is a global function, but not Game.time anymore
-  if (getTicks() % 10 === 0) {
-    console.log(`I have ${myCreeps.length} creeps`);
-  }
+  // 获取我方单位
+  myCreeps = getObjectsByPrototype(Creep).filter(i => i.my)
+  myFlag ??= getObjectsByPrototype(Flag).find(i => i.my)
+  myTowers = getObjectsByPrototype(StructureTower).filter(i => i.my)
 
-  // Run all my creeps according to their bodies
+  // 获取敌方单位
+  enemyCreeps = getObjectsByPrototype(Creep).filter(i => !i.my)
+  enemyFlag ??= getObjectsByPrototype(Flag).find(i => !i.my) as Flag
+
+  // 根据他们的身体来分类 和 运行
   myCreeps.forEach(creep => {
     if (creep.body.some(i => i.type === ATTACK)) {
-      meleeAttacker(creep);
+      attackCreeps.push(creep)
     }
-    if (creep.body.some(i => i.type === RANGED_ATTACK)) {
-      rangedAttacker(creep);
+    else if (creep.body.some(i => i.type === RANGED_ATTACK)) {
+      rangedCreeps.push(creep)
     }
-    if (creep.body.some(i => i.type === HEAL)) {
-      healer(creep);
+    else if (creep.body.some(i => i.type === HEAL)) {
+      healCreeps.push(creep)
     }
-  });
+  })
+
+  // 请注意 getTime 是一个全局函数，但不再是 Game.time
+  if (getTicks() % 10 === 0) {
+    console.log(`🐞 ${myCreeps.length}  🗡 ${attackCreeps.length}  🔫 ${rangedCreeps.length}  ❤️‍🩹 ${healCreeps.length}`)
+  }
+
+  // 进行编队
+  formation()
+
+  // 让所有的爬开始工作
+  attackCreeps.forEach(creep => meleeAttacker(creep))
+  rangedCreeps.forEach(creep => rangedAttacker(creep))
+  healCreeps.forEach(creep => healer(creep))
+
+  // 让塔开始工作
+  myTowers.forEach(tower => towerProd(tower))
+}
+
+/** 编队 */
+function formation() {
+  const rangeds = [...rangedCreeps]
+  const heals = [...healCreeps]
+
+  heals.forEach(creep => {
+    // 如果已经有目标了，就不需要分配了
+    if (creep.target && creep.target.exists) return
+
+    const ranged = rangeds.shift()
+    if (!ranged) return console.log(`❌ Heal: ${creep.id} 组队匹配失败`)
+    creep.target = ranged
+    ranged.myHealers ??= []
+    ranged.myHealers.push(creep)
+  })
 }
 
 function meleeAttacker(creep: Creep) {
-  // Here is the alternative to the creep "memory" from Screeps World. All game objects are persistent. You can assign any property to it once, and it will be available during the entire match.
-  if (!creep.initialPos) {
-    creep.initialPos = { x: creep.x, y: creep.y };
+  // 将旗帜设置为起始位置
+  if (!creep.initialPos && myFlag) {
+    creep.initialPos = myFlag
+  }
+
+  // 获取距离 10 以内的敌方，按照最近目标排序
+  const targets = enemyCreeps
+    .filter(i => getRange(i, creep.initialPos) < 10)
+    .sort((a, b) => getRange(a, creep) - getRange(b, creep))
+
+  // 如果附近有敌人，则进行攻击，否则返回防守点
+  if (targets.length > 0) {
+    // creep.moveTo(targets[0]);
+    creep.attack(targets[0]);
+  } else {
+    creep.moveTo(creep.initialPos)
   }
 
   new Visual().text(
@@ -94,66 +158,106 @@ function meleeAttacker(creep: Creep) {
       backgroundColor: "#808080",
       backgroundPadding: 0.03,
     }
-    );
-  const targets = enemyCreeps
-    .filter(i => getRange(i, creep.initialPos) < 10)
-    .sort((a, b) => getRange(a, creep) - getRange(b, creep));
-
-  if (targets.length > 0) {
-    creep.moveTo(targets[0]);
-    creep.attack(targets[0]);
-  } else {
-    creep.moveTo(creep.initialPos);
-  }
+  )
 }
 
 function rangedAttacker(creep: Creep) {
-  const targets = enemyCreeps.sort((a, b) => getRange(a, creep) - getRange(b, creep));
+  const attackRange = 10
+  const lagRange = 3
+  const fleeRange = 3
 
-  if (targets.length > 0) {
-    creep.rangedAttack(targets[0]);
+  const targets = enemyCreeps.filter(i => getRange(i, creep) < attackRange).sort((a, b) => a.hits - b.hits)
+  const targetInRange = enemyCreeps.filter(i => getRange(i, creep) < 4).sort((a, b) => a.hits - b.hits)
+
+  const leftBehinds = creep.myHealers?.filter(i => getRange(i, creep) > lagRange).sort((a, b) => getRange(a, creep) - getRange(b, creep))
+
+
+
+  // 血量低于 50% 时进入濒死状态
+  if (creep.hits < creep.hitsMax * 0.6 && creep.myHealers?.length) {
+    creep.state = CreepState.Dying
+  } // 血量恢复到 90% 时退出濒死状态
+  else if (creep.hits > creep.hitsMax * 0.7) {
+    creep.state = CreepState.Default
+  } // 如果有敌人接近我方旗帜，则进入回防模式
+  if (myFlag && enemyCreeps.find(i => getRange(i, myFlag as any) < 51)) {
+    creep.state = CreepState.Defense
   }
 
-  if (enemyFlag) {
-    creep.moveTo(enemyFlag);
+  // 攻击射程内血量最低目标
+  if (targetInRange.length > 0) {
+    creep.rangedAttack(targetInRange[0])
   }
 
-  const range = 3;
-  const enemiesInRange = enemyCreeps.filter(i => getRange(i, creep) < range);
+  // 移动策略
+  if (leftBehinds?.length && ((creep.myHealers?.length || 0) - leftBehinds.length) < 3) {
+    creep.moveTo(leftBehinds[0])
+  } // 如果距离敌方旗子十步以内，优先向旗子移动
+  else if (getRange(enemyFlag, creep) < 10) {
+    creep.moveTo(enemyFlag)
+  } // 如果附近有敌人，向附近敌人中血量最低的敌人移动
+  else if (targets.length) {
+    creep.moveTo(targets[0])
+  }
+  else if (creep.state === CreepState.Defense && myFlag) {
+    creep.moveTo(myFlag)
+  } // 默认向敌方旗子移动
+  else {
+    creep.moveTo(enemyFlag)
+  }
+
+  // 血量低于百分之五十时回避加血
+  if (creep.state === CreepState.Dying) {
+    const enemiesInRange = enemyCreeps.filter(i => getRange(i, creep) < fleeRange)
+    if (enemiesInRange.length) {
+      flee(creep, enemiesInRange, fleeRange)
+    } else if (myFlag) {
+      creep.moveTo(myFlag)
+    }
+  } // 如果受到攻击，触发回避
+  else if (creep.hits < (creep?.historyHits || creep.hits)) {
+    const enemiesInRange = enemyCreeps.filter(i => getRange(i, creep) < fleeRange);
+    if (enemiesInRange.length > 0) {
+      flee(creep, enemiesInRange, fleeRange);
+    }
+  }
+  creep.historyHits = creep.hits
+}
+
+/** 奶妈程序 */
+function healer(creep: Creep) {
+  const fleeRange = 5
+
+  if (!creep.target) {
+    console.log(`❌ heal:${creep.id} 没有治疗目标`)
+    if (enemyFlag) creep.moveTo(enemyFlag)
+    return
+  }
+  const healTarget = creep.target.hits < creep.target.hitsMax
+    ? creep.target
+    : creep.target.myHealers
+      ?.filter(i => i.hits < i.hitsMax && getRange(i, creep) < 4)
+      .sort((a, b) => a.hits - b.hits)[0]
+      || creep.target
+
+  creep.moveTo(creep.target)
+  creep.rangedHeal(healTarget)
+
+  const enemiesInRange = enemyCreeps.filter(i => getRange(i, creep) < fleeRange)
   if (enemiesInRange.length > 0) {
-    flee(creep, enemiesInRange, range);
+    flee(creep, enemiesInRange, fleeRange);
   }
 }
 
-function healer(creep: Creep) {
-  const targets = myCreeps.filter(i => i !== creep && i.hits < i.hitsMax).sort((a, b) => a.hits - b.hits);
+function towerProd(tower: StructureTower) {
+  const target = tower.findClosestByRange(enemyCreeps)
+  const healTarget = myCreeps.filter(i => getRange(i, tower) < 51 && i.hits < i.hitsMax).sort((a, b) => a.hits - b.hits)
 
-  if (targets.length) {
-    creep.moveTo(targets[0]);
-  } else {
-    if (enemyFlag) {
-      creep.moveTo(enemyFlag);
-    }
+  if (target) {
+    tower.attack(target)
   }
-
-  const healTargets = myCreeps.filter(i => getRange(i, creep) <= 3).sort((a, b) => a.hits - b.hits);
-
-  if (healTargets.length > 0) {
-    if (getRange(healTargets[0], creep) === 1) {
-      creep.heal(healTargets[0]);
-    } else {
-      creep.rangedHeal(healTargets[0]);
-    }
-  }
-
-  const range = 7;
-  const enemiesInRange = enemyCreeps.filter(i => getRange(i, creep) < range);
-  if (enemiesInRange.length > 0) {
-    flee(creep, enemiesInRange, range);
-  }
-
-  if (enemyFlag) {
-    creep.moveTo(enemyFlag);
+  else if (healTarget.length) {
+    tower.heal(healTarget[0])
   }
 }
 
