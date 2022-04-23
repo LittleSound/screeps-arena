@@ -58,7 +58,7 @@ declare module "game/prototypes" {
 // The game guarantees there will be no global reset during the match.
 // Note that you cannot assign any game objects here, since they are populated on the first tick, not when the script is initialized.
 let myCreeps: Creep[]
-let myFlag: Flag | undefined
+let myFlag: Flag
 let myTowers: StructureTower[]
 
 let enemyCreeps: Creep[]
@@ -76,7 +76,7 @@ export function loop(): void {
 
   // 获取我方单位
   myCreeps = getObjectsByPrototype(Creep).filter(i => i.my)
-  myFlag ??= getObjectsByPrototype(Flag).find(i => i.my)
+  myFlag ??= getObjectsByPrototype(Flag).find(i => i.my) as Flag
   myTowers = getObjectsByPrototype(StructureTower).filter(i => i.my)
 
   // 获取敌方单位
@@ -120,10 +120,22 @@ function formation() {
 
   heals.forEach(creep => {
     // 如果已经有目标了，就不需要分配了
-    if (creep.target && creep.target.exists) return
+    if (creep.target && creep.target.exists) {
+      return
+    }
+    creep.target = undefined
 
-    const ranged = rangeds.shift()
+    // 补货
+    if (!(rangeds.length > 0) && (rangedCreeps.length > 0)) {
+      rangeds.push(...rangedCreeps)
+    }
+    else if (attackCreeps.length > 0) {
+      rangeds.push(...attackCreeps)
+    }
+
+    let ranged = rangeds.shift()
     if (!ranged) return console.log(`❌ Heal: ${creep.id} 组队匹配失败`)
+
     creep.target = ranged
     ranged.myHealers ??= []
     ranged.myHealers.push(creep)
@@ -162,14 +174,19 @@ function meleeAttacker(creep: Creep) {
 }
 
 function rangedAttacker(creep: Creep) {
+  /** 攻击范围 */
   const attackRange = 10
+  /** 队伍范围 */
   const lagRange = 3
+  /** 逃离范围 */
   const fleeRange = 3
 
   const targets = enemyCreeps.filter(i => getRange(i, creep) < attackRange).sort((a, b) => a.hits - b.hits)
   const targetInRange = enemyCreeps.filter(i => getRange(i, creep) < 4).sort((a, b) => a.hits - b.hits)
 
   const leftBehinds = creep.myHealers?.filter(i => getRange(i, creep) > lagRange).sort((a, b) => getRange(a, creep) - getRange(b, creep))
+
+  const assaultEnemys = enemyCreeps.filter(i => getRange(i, myFlag) < 51).sort((a, b) => getRange(a, myFlag) - getRange(b, myFlag))
 
 
 
@@ -180,47 +197,72 @@ function rangedAttacker(creep: Creep) {
   else if (creep.hits > creep.hitsMax * 0.7) {
     creep.state = CreepState.Default
   } // 如果有敌人接近我方旗帜，则进入回防模式
-  if (myFlag && enemyCreeps.find(i => getRange(i, myFlag as any) < 51)) {
+  if (myFlag && assaultEnemys.length > 0 && getTicks() < 1500) {
     creep.state = CreepState.Defense
   }
 
-  // 攻击射程内血量最低目标
-  if (targetInRange.length > 0) {
+  // 如果射程内有多个目标，则发动范围攻击
+  if (targetInRange.length > 2) {
+    creep.rangedMassAttack()
+  } // 否则 攻击射程内血量最低目标
+  else if (targetInRange.length > 0) {
     creep.rangedAttack(targetInRange[0])
   }
 
-  // 移动策略
-  if (leftBehinds?.length && ((creep.myHealers?.length || 0) - leftBehinds.length) < 3) {
-    creep.moveTo(leftBehinds[0])
-  } // 如果距离敌方旗子十步以内，优先向旗子移动
-  else if (getRange(enemyFlag, creep) < 10) {
-    creep.moveTo(enemyFlag)
-  } // 如果附近有敌人，向附近敌人中血量最低的敌人移动
-  else if (targets.length) {
-    creep.moveTo(targets[0])
+  if (creep.state === CreepState.Default) {
+    // 移动策略
+    if (leftBehinds?.length && ((creep.myHealers?.length || 0) - leftBehinds.length) < 2) {
+      creep.moveTo(leftBehinds[0])
+    }
+    // 如果距离敌方旗子十步以内，优先向旗子移动
+    else if (getRange(enemyFlag, creep) < 10) {
+      creep.moveTo(enemyFlag)
+    } // 如果附近有敌人，向附近敌人中血量最低的敌人移动
+    else if (targets.length) {
+      creep.moveTo(targets[0])
+    } // 默认向敌方旗子移动
+    else {
+      creep.moveTo(enemyFlag)
+    }
+  } else {
+    // 移动策略
+    if (leftBehinds?.length && ((creep.myHealers?.length || 0) - leftBehinds.length) < 2) {
+      creep.moveTo(leftBehinds[0])
+    } // 向距离旗帜最近的敌人移动
+    else if (assaultEnemys.length > 0) {
+      creep.moveTo(assaultEnemys[0])
+    }
+    else if (creep.state === CreepState.Defense && myFlag) {
+      creep.moveTo(myFlag)
+    }
   }
-  else if (creep.state === CreepState.Defense && myFlag) {
-    creep.moveTo(myFlag)
-  } // 默认向敌方旗子移动
+
+  const enemiesInRange = enemyCreeps.filter(i => getRange(i, creep) < fleeRange)
+  if (assaultEnemys[0] && getRange(assaultEnemys[0], myFlag) < 5) {
+    creep.moveTo(assaultEnemys[0])
+  }
   else {
+    // 血量低于百分之五十时回避加血
+    if (creep.state === CreepState.Dying) {
+      if (enemiesInRange.length) {
+        flee(creep, enemiesInRange, fleeRange)
+      } else if (myFlag) {
+        creep.moveTo(myFlag)
+      }
+    } // 接近敌人攻击范围时自动避让
+    else {
+      if (enemiesInRange.length > 0) {
+        flee(creep, enemiesInRange, fleeRange);
+      }
+    }
+  }
+
+
+  // 如果距离敌方旗子十步以内，优先向旗子移动
+  if (getRange(enemyFlag, creep) < 4) {
     creep.moveTo(enemyFlag)
   }
 
-  // 血量低于百分之五十时回避加血
-  if (creep.state === CreepState.Dying) {
-    const enemiesInRange = enemyCreeps.filter(i => getRange(i, creep) < fleeRange)
-    if (enemiesInRange.length) {
-      flee(creep, enemiesInRange, fleeRange)
-    } else if (myFlag) {
-      creep.moveTo(myFlag)
-    }
-  } // 如果受到攻击，触发回避
-  else if (creep.hits < (creep?.historyHits || creep.hits)) {
-    const enemiesInRange = enemyCreeps.filter(i => getRange(i, creep) < fleeRange);
-    if (enemiesInRange.length > 0) {
-      flee(creep, enemiesInRange, fleeRange);
-    }
-  }
   creep.historyHits = creep.hits
 }
 
@@ -233,6 +275,8 @@ function healer(creep: Creep) {
     if (enemyFlag) creep.moveTo(enemyFlag)
     return
   }
+
+
   const healTarget = creep.target.hits < creep.target.hitsMax
     ? creep.target
     : creep.target.myHealers
@@ -242,6 +286,13 @@ function healer(creep: Creep) {
 
   creep.moveTo(creep.target)
   creep.rangedHeal(healTarget)
+
+
+
+  // // 如果距离敌方旗子十步以内，优先向旗子移动
+  // if (getRange(enemyFlag, creep) < 4) {
+  //   creep.moveTo(enemyFlag)
+  // }
 
   const enemiesInRange = enemyCreeps.filter(i => getRange(i, creep) < fleeRange)
   if (enemiesInRange.length > 0) {
